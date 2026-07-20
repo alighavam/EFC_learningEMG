@@ -114,7 +114,38 @@ def find_trigger_rise_edge(trig, fs, riseThresh=0.6, fallThresh=0.4, min_width_m
         plt.show()
 
     return riseIdx, fallIdx
-    
+
+
+def plot_raw_trigger(trig, fs=None, title='Raw trigger'):
+    '''
+        Description: Plots the raw (unprocessed) trigger channel for visual debugging.
+        Unlike find_trigger_rise_edge(debug=1), this does not normalize or median-filter.
+
+        <inputs>
+        trig: Raw trigger channel array (e.g. Analog 1).
+
+        fs: Optional sampling rate. If provided, x-axis is time in seconds;
+        otherwise sample index is used.
+
+        title: Plot title. Default 'Raw trigger'.
+    '''
+    trig = np.asarray(trig, dtype=float)
+    n = np.arange(len(trig))
+
+    plt.figure(figsize=(22, 4))
+    if fs is not None:
+        plt.plot(n / fs, trig, label='raw trigger', linewidth=0.8)
+        plt.xlabel('time (s)')
+    else:
+        plt.plot(n, trig, label='raw trigger', linewidth=0.8)
+        plt.xlabel('sample index')
+    plt.ylabel('Volts')
+    plt.title(title)
+    plt.legend(loc='upper right')
+    plt.tight_layout()
+    plt.show()
+
+
 def downsample_emg(emg, fs, target_fs=1000, debug=0):
     
     # resampled emg:
