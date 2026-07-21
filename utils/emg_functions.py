@@ -3,11 +3,38 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from scipy import signal
 
+def _trigger_is_idle_high(trig, fs, start_idx=0, baseline_ms=200):
+    '''
+        Returns True if the trigger channel is idle-high at the start of the recording
+        (electrode wired backwards: pulses go high→0 instead of 0→high).
+
+        Compares the median of an early baseline window to the robust [1, 99]
+        percentile range of the usable signal. Baseline near the high end ⇒ inverted.
+    '''
+    x = np.asarray(trig[start_idx:], dtype=float)
+    if len(x) < 2:
+        return False
+
+    lo, hi = np.percentile(x, [1, 99])
+    scale = hi - lo
+    if scale < 1e-12:
+        return False
+
+    n_base = max(1, int(round(baseline_ms * 1e-3 * fs)))
+    n_base = min(n_base, len(x))
+    baseline = np.median(x[:n_base])
+    return (baseline - lo) / scale > 0.5
+
+
 def find_trigger_rise_edge(trig, fs, riseThresh=0.6, fallThresh=0.4, min_width_ms=20,
                            start_idx=0, debug=0):
     '''
         Description: Detects triggers from the trigger channel of the data using
         hysteresis thresholding (Schmitt trigger) with a min pulse-width gate.
+
+        If the electrode is wired backwards, the idle level is high and pulses go
+        high→0. That case is detected from the early baseline and the raw trigger
+        is negated before normalization and edge detection.
 
         <inputs>
         trig: emg channel that records triggers. For my case it should always be the first channel.
@@ -41,6 +68,11 @@ def find_trigger_rise_edge(trig, fs, riseThresh=0.6, fallThresh=0.4, min_width_m
     start_idx = int(start_idx)
     if start_idx < 0 or start_idx >= len(trig):
         raise ValueError("start_idx must be in [0, len(trig)).")
+
+    # Backwards electrode: idle is high; negate raw signal so pulses are low→high.
+    inverted = _trigger_is_idle_high(trig, fs, start_idx=start_idx)
+    if inverted:
+        trig = -trig
 
     # Detect only on the usable suffix; normalize on this segment so early corruption
     # does not warp thresholds.
@@ -82,6 +114,8 @@ def find_trigger_rise_edge(trig, fs, riseThresh=0.6, fallThresh=0.4, min_width_m
 
     if debug:
         print("\n\n======== Trigger Detection Results: ======== \n")
+        print("Polarity: {}".format(
+            "INVERTED (raw negated; idle was high)" if inverted else "normal (idle low)"))
         print("Num Rise Trigger = {:d}".format(len(riseIdx)))
         print("Num Fall Triggers = {:d}".format(len(fallIdx)))
         print("Two numbers should be equal to the number of trials.\n")
