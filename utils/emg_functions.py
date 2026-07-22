@@ -233,49 +233,106 @@ def downsample_emg(emg, fs, target_fs=1000, debug=0):
 
     return emg_resampled, target_fs
 
-def filter_emg(emg, fs, low=20, high=500, order=2, debug=0):
-    # filtered emg:
-    emg_filtered = []
+def bandpass_filter_emg(emg, fs, low=20, high=500, order=2, debug=0):
+    '''
+        Description: Zero-phase Butterworth bandpass filter for a single-trial
+        EMG matrix (samples x channels), matching the per-trial workflow in
+        preprocessing.ipynb.
 
-    # designing bandpass filter:
-    sos = signal.butter(order, [low, high-1], btype='bandpass', fs=fs, output='sos')  # using 'sos' to avoid numerical errors
+        <inputs>
+        emg: (N, C) array — samples x channels for one trial.
 
-    # iterating through signals and filtering:
-    for i in range(len(emg)):
-        # selecting the emg signal of trial i:
-        emg_trial = emg[i]
+        fs: Sampling rate in Hz.
 
-        # making an empty array to contain the filtered signal:
-        emg_trial_filtered = np.empty((np.shape(emg_trial)[0], np.shape(emg_trial)[1]))
+        low: High-pass cutoff in Hz. Default 20.
 
-        # iterating through emg channels:
-        for ch in range(np.shape(emg_trial)[1]):
-            # selecting the signal:
-            sig = emg_trial[:,ch]
+        high: Low-pass cutoff in Hz. Default 500. Clamped just below Nyquist
+        if it would otherwise be invalid for fs.
 
-            # filtering the signal:
-            sig_filtered = signal.sosfiltfilt(sos, sig)
+        order: Butterworth filter order. Default 2.
 
-            # appending the filtered signal to the emg_trial_filtered:
-            emg_trial_filtered[:,ch] = sig_filtered
+        debug: If 1, plot original vs filtered for channel 0.
 
-            # plotting filtered against original signal:
-            if debug and i==0 and ch==0:
-                # time vector for plotting:
-                t = np.linspace(0,len(sig)/fs,len(sig))
+        <outputs>
+        emg_filtered: (N, C) bandpass-filtered array (same shape as emg).
+    '''
+    emg = np.asarray(emg, dtype=float)
+    if emg.ndim != 2:
+        raise ValueError("emg must be a 2D array of shape (samples, channels).")
 
-                # plotting:
-                plt.figure()
-                plt.plot(t, sig, label='Original Signal')
-                plt.plot(t, sig_filtered, label='Filtered Signal')
-                plt.legend()
-                plt.show()
-        
-        # appending the resampled trial to the resampled emg:
-        emg_filtered.append(emg_trial_filtered)
+    nyq = 0.5 * fs
+    high_eff = min(float(high), nyq * 0.999)
+    if low <= 0 or high_eff <= low:
+        raise ValueError(
+            f"Invalid bandpass [{low}, {high}] Hz for fs={fs} (Nyquist={nyq:.3f})."
+        )
+
+    # sos form avoids numerical errors from high-order transfer-function filters
+    sos = signal.butter(order, [low, high_eff], btype='bandpass', fs=fs, output='sos')
+    emg_filtered = signal.sosfiltfilt(sos, emg, axis=0)
+
+    if debug:
+        sig = emg[:, 0]
+        sig_filtered = emg_filtered[:, 0]
+        t = np.linspace(0, len(sig) / fs, len(sig), endpoint=False)
+        plt.figure()
+        plt.plot(t, sig, label='Original Signal')
+        plt.plot(t, sig_filtered, label='Filtered Signal')
+        plt.xlabel('time (s)')
+        plt.legend()
+        plt.show()
 
     return emg_filtered
-    
+
+
+def low_pass_filter(emg, fs, cutoff=30, order=4, debug=0):
+    '''
+        Description: Zero-phase Butterworth low-pass filter for a single-trial
+        EMG matrix (samples x channels).
+
+        <inputs>
+        emg: (N, C) array — samples x channels for one trial.
+
+        fs: Sampling rate in Hz.
+
+        cutoff: Low-pass cutoff in Hz. Default 30. Clamped just below Nyquist
+        if it would otherwise be invalid for fs.
+
+        order: Butterworth filter order. Default 4.
+
+        debug: If 1, plot original vs filtered for channel 0.
+
+        <outputs>
+        emg_filtered: (N, C) low-pass-filtered array (same shape as emg).
+    '''
+    emg = np.asarray(emg, dtype=float)
+    if emg.ndim != 2:
+        raise ValueError("emg must be a 2D array of shape (samples, channels).")
+
+    nyq = 0.5 * fs
+    cutoff_eff = min(float(cutoff), nyq * 0.999)
+    if cutoff_eff <= 0:
+        raise ValueError(
+            f"Invalid low-pass cutoff={cutoff} Hz for fs={fs} (Nyquist={nyq:.3f})."
+        )
+
+    sos = signal.butter(order, cutoff_eff, btype='lowpass', fs=fs, output='sos')
+    emg_filtered = signal.sosfiltfilt(sos, emg, axis=0)
+
+    if debug:
+        sig = emg[:, 0]
+        sig_filtered = emg_filtered[:, 0]
+        t = np.linspace(0, len(sig) / fs, len(sig), endpoint=False)
+        plt.figure()
+        plt.plot(t, sig, label='Original Signal')
+        plt.plot(t, sig_filtered, label='Low-pass Filtered')
+        plt.xlabel('time (s)')
+        plt.legend()
+        plt.show()
+
+    return emg_filtered
+
+
 def rectify_emg(emg, debug=0):
     # rectified emg:
     emg_rectified = []
