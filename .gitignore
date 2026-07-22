@@ -2,4 +2,4 @@
 /target
 /utils/__pycache__
 /analysis
-/utils/__pycache__
+*.pyc
