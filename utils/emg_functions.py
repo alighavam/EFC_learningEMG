@@ -5,7 +5,7 @@ from scipy import signal
 
 def preprocess_emg_run(fpath, channels, fs_emg=2148.1481, fs_trigger=2222.2222,
                        riseThresh=0.6, fallThresh=0.4, min_width_ms=20,
-                       notch_freq=60.0, notch_Q=30.0, notch_harmonics=True,
+                       notch_freq=60.0, notch_Q=10.0, notch_harmonics=True,
                        bp_low=20, bp_high=500, bp_order=4,
                        lp_cutoff=30, lp_order=4, debug=0):
     '''
@@ -30,7 +30,9 @@ def preprocess_emg_run(fpath, channels, fs_emg=2148.1481, fs_trigger=2222.2222,
 
         notch_freq: Line-noise fundamental (Hz). Default 60.
 
-        notch_Q: Quality factor for each notch (higher = narrower). Default 30.
+        notch_Q: Quality factor for each notch (higher = narrower). Default 10
+        (wider / more aggressive; Q=30 left measurable 60 Hz residual on
+        heavily contaminated channels such as flx_D4).
 
         notch_harmonics: If True, also notch k*notch_freq for k=2,3,... while
         the harmonic is below bp_high and Nyquist. Default True.
@@ -370,7 +372,7 @@ def _notch_freqs(freq, fs, harmonics=True, fmax=None):
     return freqs
 
 
-def notch_filter_emg(emg, fs, freq=60.0, Q=30.0, harmonics=True, fmax=None, debug=0):
+def notch_filter_emg(emg, fs, freq=60.0, Q=10.0, harmonics=True, fmax=None, debug=0):
     '''
         Description: Zero-phase IIR notch filter for an EMG matrix (samples x
         channels). Removes line noise at `freq` and, optionally, its harmonics
@@ -383,7 +385,8 @@ def notch_filter_emg(emg, fs, freq=60.0, Q=30.0, harmonics=True, fmax=None, debu
 
         freq: Fundamental notch frequency in Hz. Default 60.
 
-        Q: Quality factor (center / bandwidth). Default 30.
+        Q: Quality factor (center / bandwidth). Default 10 (≈6 Hz width at
+        60 Hz). Lower Q = wider / more aggressive attenuation.
 
         harmonics: If True, also notch 2*freq, 3*freq, ... Default True.
 
