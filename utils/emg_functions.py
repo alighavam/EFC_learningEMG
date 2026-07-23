@@ -3,7 +3,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from scipy import signal
 
-
 def preprocess_emg_run(fpath, channels, fs_emg=2148.1481, fs_trigger=2222.2222,
                        riseThresh=0.6, fallThresh=0.4, min_width_ms=20,
                        bp_low=20, bp_high=500, bp_order=4,
