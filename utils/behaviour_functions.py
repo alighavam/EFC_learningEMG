@@ -45,12 +45,17 @@ def movload(fname):
 #   col 3: state-local clock (ms; resets across some state boundaries)
 #   last 5 cols: digit forces (digit1..digit5)
 #
-# Force box samples at ~500 Hz (median col-2 dt ≈ 2 ms). EMG trigger pulses
-# match states 4–6 (execution), not waiting (1) or planning (3).
+# Force box samples at ~500 Hz (median col-2 dt ≈ 2 ms).
+#
+# EMG DIO trigger (emg.cpp):
+#   rise (SetDIOState 0x0000) at onset of WAIT_PLAN   (state 3)
+#   fall (SetDIOState 0xFFFF) at onset of GIVE_FEEDBACK (state 5)
+# so the EMG segment spans WAIT_PLAN + WAIT_EXEC only.
 MOV_STATE_COL = 1
 MOV_FORCE_COLS = 5
 FS_FORCE = 500.0  # Hz
-EMG_TRIGGER_STATE = 4  # first state covered by the EMG trigger pulse
+EMG_TRIGGER_STATE = 3       # WAIT_PLAN — trigger rise / EMG t=0
+EMG_TRIGGER_FALL_STATE = 5  # GIVE_FEEDBACK — trigger fall / EMG end
 
 
 def parse_mov_trial(mov_trial, fs_force=FS_FORCE):
@@ -92,9 +97,9 @@ def align_state_to_emg(state, trial_time, t_emg, trigger_state=EMG_TRIGGER_STATE
     '''
         Map behaviour state onto the EMG trial clock.
 
-        The EMG trigger spans execution states (default: from state 4 onward),
-        so behaviour time is re-zeroed at the first sample of trigger_state
-        before zero-order-hold resampling onto t_emg.
+        EMG t=0 is the DIO trigger rise at WAIT_PLAN (state 3). Behaviour
+        time is re-zeroed at the first sample of trigger_state, then
+        zero-order-hold resampled onto t_emg.
     '''
     state = np.asarray(state)
     trial_time = np.asarray(trial_time, dtype=float)
@@ -107,3 +112,18 @@ def align_state_to_emg(state, trial_time, t_emg, trigger_state=EMG_TRIGGER_STATE
         )
     t0 = trial_time[hits[0]]
     return align_state_to_times(state, trial_time - t0, t_emg)
+
+
+def emg_aligned_force_time(trial_time, state, trigger_state=EMG_TRIGGER_STATE):
+    '''
+        Behaviour trial_time shifted so t=0 matches EMG trigger rise
+        (first sample of trigger_state, default WAIT_PLAN / state 3).
+    '''
+    trial_time = np.asarray(trial_time, dtype=float)
+    state = np.asarray(state)
+    hits = np.where(state == trigger_state)[0]
+    if len(hits) == 0:
+        raise ValueError(
+            f"No samples with state=={trigger_state}; cannot align forces to EMG."
+        )
+    return trial_time - trial_time[hits[0]]

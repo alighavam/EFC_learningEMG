@@ -5,13 +5,16 @@ from scipy import signal
 
 def preprocess_emg_run(fpath, channels, fs_emg=2148.1481, fs_trigger=2222.2222,
                        riseThresh=0.6, fallThresh=0.4, min_width_ms=20,
+                       notch_freq=60.0, notch_Q=30.0, notch_harmonics=True,
                        bp_low=20, bp_high=500, bp_order=4,
                        lp_cutoff=30, lp_order=4, debug=0):
     '''
-        Description: Load one EMG CSV, detect trigger edges, segment each trial
-        onto the shared EMG clock, and preprocess (bandpass → demean → rectify →
-        low-pass). Does not build a dataframe — returns a list of trial dicts so
-        behaviour fields can be added before forming the subject dataframe.
+        Description: Load one EMG CSV, detect trigger edges, then preprocess the
+        continuous run (notch → bandpass → demean → rectify → low-pass) before
+        cutting trials on the shared EMG clock. Filtering the full recording
+        avoids short-segment filtfilt edge artifacts. Does not build a
+        dataframe — returns a list of trial dicts so behaviour fields can be
+        added before forming the subject dataframe.
 
         <inputs>
         fpath: Path to the EMG CSV for one run.
@@ -24,6 +27,13 @@ def preprocess_emg_run(fpath, channels, fs_emg=2148.1481, fs_trigger=2222.2222,
         fs_trigger: Trigger (Analog 1) sampling rate (Hz). Default 2222.2222.
 
         riseThresh, fallThresh, min_width_ms: Passed to find_trigger_rise_edge.
+
+        notch_freq: Line-noise fundamental (Hz). Default 60.
+
+        notch_Q: Quality factor for each notch (higher = narrower). Default 30.
+
+        notch_harmonics: If True, also notch k*notch_freq for k=2,3,... while
+        the harmonic is below bp_high and Nyquist. Default True.
 
         bp_low, bp_high, bp_order: Bandpass filter params.
 
@@ -70,7 +80,21 @@ def preprocess_emg_run(fpath, channels, fs_emg=2148.1481, fs_trigger=2222.2222,
         data[f'{ch} (mV)'].values[:n_emg] for ch in channels
     ])
 
-    # -------------------- segment + preprocess each trial --------------------
+    # -------------------- preprocess continuous run, then cut --------------------
+    emg_full = notch_filter_emg(
+        emg_full, fs_emg,
+        freq=notch_freq, Q=notch_Q, harmonics=notch_harmonics,
+        fmax=bp_high, debug=debug,
+    )
+    emg_full = bandpass_filter_emg(
+        emg_full, fs_emg, low=bp_low, high=bp_high, order=bp_order, debug=debug
+    )
+    emg_full = emg_full - np.mean(emg_full, axis=0)
+    emg_full = np.abs(emg_full)
+    emg_full = low_pass_filter(
+        emg_full, fs_emg, cutoff=lp_cutoff, order=lp_order, debug=debug
+    )
+
     trials = []
     for trial, (r_idx, f_idx) in enumerate(zip(riseIdx, fallIdx), start=1):
         t_start = trig_time[r_idx]
@@ -79,20 +103,9 @@ def preprocess_emg_run(fpath, channels, fs_emg=2148.1481, fs_trigger=2222.2222,
         i_start = np.searchsorted(emg_time, t_start) - 1
         i_end = np.searchsorted(emg_time, t_end) - 1
 
-        trial_emg = emg_full[i_start:i_end + 1, :]  # (N, C)
-
-        trial_emg = bandpass_filter_emg(
-            trial_emg, fs_emg, low=bp_low, high=bp_high, order=bp_order, debug=debug
-        )
-        trial_emg = trial_emg - np.mean(trial_emg, axis=0)
-        trial_emg = np.abs(trial_emg)
-        trial_emg = low_pass_filter(
-            trial_emg, fs_emg, cutoff=lp_cutoff, order=lp_order, debug=debug
-        )
-
         trials.append({
             'trial': trial,
-            'emg': trial_emg,
+            'emg': emg_full[i_start:i_end + 1, :],
             't_start': float(t_start),
             't_end': float(t_end),
             'channels': list(channels),
@@ -330,14 +343,99 @@ def downsample_emg(emg, fs, target_fs=1000, debug=0):
 
     return emg_resampled, target_fs
 
-def bandpass_filter_emg(emg, fs, low=20, high=500, order=2, debug=0):
+def _notch_freqs(freq, fs, harmonics=True, fmax=None):
     '''
-        Description: Zero-phase Butterworth bandpass filter for a single-trial
-        EMG matrix (samples x channels), matching the per-trial workflow in
-        preprocessing.ipynb.
+        Line-noise notch centers: fundamental, optionally harmonics k*freq,
+        kept strictly below Nyquist and optional fmax (e.g. bandpass high cut).
+    '''
+    freq = float(freq)
+    if freq <= 0:
+        raise ValueError(f"notch freq must be > 0, got {freq}.")
+
+    nyq = 0.5 * float(fs)
+    limit = nyq * 0.999
+    if fmax is not None:
+        limit = min(limit, float(fmax))
+
+    freqs = []
+    k = 1
+    while True:
+        f = freq * k
+        if f >= limit:
+            break
+        freqs.append(f)
+        if not harmonics:
+            break
+        k += 1
+    return freqs
+
+
+def notch_filter_emg(emg, fs, freq=60.0, Q=30.0, harmonics=True, fmax=None, debug=0):
+    '''
+        Description: Zero-phase IIR notch filter for an EMG matrix (samples x
+        channels). Removes line noise at `freq` and, optionally, its harmonics
+        below Nyquist / `fmax`.
 
         <inputs>
-        emg: (N, C) array — samples x channels for one trial.
+        emg: (N, C) array — samples x channels (full run or trial).
+
+        fs: Sampling rate in Hz.
+
+        freq: Fundamental notch frequency in Hz. Default 60.
+
+        Q: Quality factor (center / bandwidth). Default 30.
+
+        harmonics: If True, also notch 2*freq, 3*freq, ... Default True.
+
+        fmax: Optional upper bound on notch centers (Hz), e.g. bandpass high
+        cutoff so harmonics outside the keep-band are skipped.
+
+        debug: If 1, plot original vs notched for channel 0 and print centers.
+
+        <outputs>
+        emg_filtered: (N, C) notched array (same shape as emg).
+    '''
+    emg = np.asarray(emg, dtype=float)
+    if emg.ndim != 2:
+        raise ValueError("emg must be a 2D array of shape (samples, channels).")
+    if Q <= 0:
+        raise ValueError(f"notch Q must be > 0, got {Q}.")
+
+    freqs = _notch_freqs(freq, fs, harmonics=harmonics, fmax=fmax)
+    if not freqs:
+        raise ValueError(
+            f"No valid notch frequencies for freq={freq}, fs={fs}, fmax={fmax}."
+        )
+
+    emg_filtered = emg.copy()
+    for f0 in freqs:
+        b, a = signal.iirnotch(f0, Q, fs=fs)
+        sos = signal.tf2sos(b, a)
+        emg_filtered = signal.sosfiltfilt(sos, emg_filtered, axis=0)
+
+    if debug:
+        print("Notch centers (Hz): {}".format(
+            ", ".join(f"{f:.1f}" for f in freqs)))
+        sig = emg[:, 0]
+        sig_filtered = emg_filtered[:, 0]
+        t = np.linspace(0, len(sig) / fs, len(sig), endpoint=False)
+        plt.figure()
+        plt.plot(t, sig, label='Original Signal', lw=0.8)
+        plt.plot(t, sig_filtered, label='Notched Signal', lw=0.8)
+        plt.xlabel('time (s)')
+        plt.legend()
+        plt.show()
+
+    return emg_filtered
+
+
+def bandpass_filter_emg(emg, fs, low=20, high=500, order=2, debug=0):
+    '''
+        Description: Zero-phase Butterworth bandpass filter for an EMG matrix
+        (samples x channels). Intended for the continuous run before trial cuts.
+
+        <inputs>
+        emg: (N, C) array — samples x channels.
 
         fs: Sampling rate in Hz.
 
@@ -384,11 +482,11 @@ def bandpass_filter_emg(emg, fs, low=20, high=500, order=2, debug=0):
 
 def low_pass_filter(emg, fs, cutoff=30, order=4, debug=0):
     '''
-        Description: Zero-phase Butterworth low-pass filter for a single-trial
-        EMG matrix (samples x channels).
+        Description: Zero-phase Butterworth low-pass filter for an EMG matrix
+        (samples x channels). Used for the envelope after rectification.
 
         <inputs>
-        emg: (N, C) array — samples x channels for one trial.
+        emg: (N, C) array — samples x channels.
 
         fs: Sampling rate in Hz.
 

@@ -4,3 +4,4 @@
 /analysis
 *.pyc
 .DS_Store
+/figures
