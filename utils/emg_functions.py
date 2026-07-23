@@ -3,6 +3,104 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from scipy import signal
 
+
+def preprocess_emg_run(fpath, channels, fs_emg=2148.1481, fs_trigger=2222.2222,
+                       riseThresh=0.6, fallThresh=0.4, min_width_ms=20,
+                       bp_low=20, bp_high=500, bp_order=4,
+                       lp_cutoff=30, lp_order=4, debug=0):
+    '''
+        Description: Load one EMG CSV, detect trigger edges, segment each trial
+        onto the shared EMG clock, and preprocess (bandpass → demean → rectify →
+        low-pass). Does not build a dataframe — returns a list of trial dicts so
+        behaviour fields can be added before forming the subject dataframe.
+
+        <inputs>
+        fpath: Path to the EMG CSV for one run.
+
+        channels: Ordered list of EMG channel names (without ' (mV)' suffix),
+        e.g. ['flx_D1', ..., 'ext_D5'].
+
+        fs_emg: EMG sampling rate (Hz). Default 2148.1481.
+
+        fs_trigger: Trigger (Analog 1) sampling rate (Hz). Default 2222.2222.
+
+        riseThresh, fallThresh, min_width_ms: Passed to find_trigger_rise_edge.
+
+        bp_low, bp_high, bp_order: Bandpass filter params.
+
+        lp_cutoff, lp_order: Envelope low-pass filter params.
+
+        debug: Passed to trigger detection / filters. Default 0.
+
+        <outputs>
+        trials: List of dicts, one per trial, each with:
+            'trial' (1-based int),
+            'emg' ((N, C) preprocessed matrix),
+            't_start', 't_end' (trigger-clock times in seconds),
+            'channels' (copy of the channels list).
+    '''
+    # -------------------- load CSV --------------------
+    header = pd.read_csv(fpath, skiprows=5, nrows=1, header=None)
+    header = header.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
+    data = pd.read_csv(fpath, skiprows=8, header=None, usecols=list(range(28)), low_memory=False)
+    data = data.iloc[:, :28]
+    data.columns = header.iloc[0, :28]
+    data = data.reset_index(drop=True)
+    for c in data.columns:
+        data[c] = pd.to_numeric(data[c], errors='coerce')
+
+    # -------------------- trigger edges --------------------
+    trig_time = data['Analog 1 Time Series (s)'].values  # seconds
+    trigger = data['Analog 1 (V)'].values
+    n_trig = int(np.sum(~np.isnan(trig_time)))
+    trig_time = trig_time[:n_trig]
+    trigger = trigger[:n_trig]
+
+    riseIdx, fallIdx = find_trigger_rise_edge(
+        trigger, fs_trigger,
+        riseThresh=riseThresh, fallThresh=fallThresh,
+        min_width_ms=min_width_ms, debug=debug,
+    )
+
+    # -------------------- EMG time + data (shared clock across channels) --------------------
+    emg_time = data['flx_D1 Time Series (s)'].values
+    n_emg = int(np.sum(~np.isnan(emg_time)))
+    emg_time = emg_time[:n_emg]
+
+    emg_full = np.column_stack([
+        data[f'{ch} (mV)'].values[:n_emg] for ch in channels
+    ])
+
+    # -------------------- segment + preprocess each trial --------------------
+    trials = []
+    for trial, (r_idx, f_idx) in enumerate(zip(riseIdx, fallIdx), start=1):
+        t_start = trig_time[r_idx]
+        t_end = trig_time[f_idx]
+
+        i_start = np.searchsorted(emg_time, t_start) - 1
+        i_end = np.searchsorted(emg_time, t_end) - 1
+
+        trial_emg = emg_full[i_start:i_end + 1, :]  # (N, C)
+
+        trial_emg = bandpass_filter_emg(
+            trial_emg, fs_emg, low=bp_low, high=bp_high, order=bp_order, debug=debug
+        )
+        trial_emg = trial_emg - np.mean(trial_emg, axis=0)
+        trial_emg = np.abs(trial_emg)
+        trial_emg = low_pass_filter(
+            trial_emg, fs_emg, cutoff=lp_cutoff, order=lp_order, debug=debug
+        )
+
+        trials.append({
+            'trial': trial,
+            'emg': trial_emg,
+            't_start': float(t_start),
+            't_end': float(t_end),
+            'channels': list(channels),
+        })
+
+    return trials
+
 def _trigger_is_idle_high(trig, fs, start_idx=0, baseline_ms=200):
     '''
         Returns True if the trigger channel is idle-high at the start of the recording
